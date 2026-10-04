@@ -1,7 +1,7 @@
 # ⚙️ MARK LIV (54)
-### The Ultimate Cross-Platform Personal AI Assistant — By Kashur Engineer ⚡
+### The Ultimate Cross-Platform Personal AI Assistant — By Anish Team ⚡
 
-> 📸 **[Follow Kashur Engineer on Instagram](https://www.instagram.com/kashurengineer/)**
+> 📸 **[Follow AnishNova Technologies on Instagram](https://www.instagram.com/anishnovatechnologiesofficial/)**
 
 A real-time voice AI that can hear, see, speak, and control your computer — on any OS. Supports Windows, macOS, and Linux. Built on the Gemini Live API for native audio streaming, delivering zero subscriptions and total digital autonomy.
 
@@ -280,8 +280,8 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ### Method 1: Automatic 1-Click Launch (Recommended for Windows)
 1. Clone the repository:
    ```bash
-   git clone https://github.com/Zahidcse68/updated-Jarvis-by-Kashur-Engineer-.git
-   cd updated-Jarvis-by-Kashur-Engineer-
+   git clone https://github.com/buildwithanish2/updated-Jarvis-By Anish Team-.git
+   cd updated-Jarvis-By Anish Team-
    ```
 2. Double-click **`run.bat`**.
    - It will automatically set up the virtual environment, install requirements, and launch MARK LIV.
@@ -292,8 +292,8 @@ It is held in memory only, deliberately: writing it to disk would make a fresh l
 ### Method 2: Manual Setup (Windows, macOS, Linux)
 ```bash
 # 1. Clone repository
-git clone https://github.com/Zahidcse68/updated-Jarvis-by-Kashur-Engineer-.git
-cd updated-Jarvis-by-Kashur-Engineer-
+git clone https://github.com/buildwithanish2/updated-Jarvis-By Anish Team-.git
+cd updated-Jarvis-By Anish Team-
 
 # 2. Create and activate virtual environment
 python -m venv .venv
@@ -389,11 +389,11 @@ Everything stays on your machine. There is no external server, no telemetry, and
 
 ## 👤 Connect with the Creator
 
-⚡ **MARK LIV - Custom Edition by Kashur Engineer**
+⚡ **MARK LIV - Custom Edition By Anish Team**
 
 ⭐ **Star the repository to support the project!**
 
 | Platform | Link |
 | --- | --- |
-| 📸 Instagram | **[@kashurengineer](https://www.instagram.com/kashurengineer/)** |
-| 🐙 GitHub | **[@Zahidcse68](https://github.com/Zahidcse68)** |
+| 📸 Instagram | **[@anishnovatechnologiesofficial](https://www.instagram.com/anishnovatechnologiesofficial/)** |
+| 🐙 GitHub | **[@buildwithanish2](https://github.com/buildwithanish2)** |
