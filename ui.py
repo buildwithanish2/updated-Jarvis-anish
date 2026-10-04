@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -37,6 +38,11 @@ try:
     from core.avatar import HoloAvatar
 except Exception:      # pragma: no cover — HUD must never die over cosmetics
     HoloAvatar = None
+
+try:
+    from core.gesture_tracker import GestureTracker
+except Exception:
+    GestureTracker = None
 
 
 def _base_dir() -> Path:
@@ -179,6 +185,73 @@ def retheme_all_widgets(old: dict[str, str], new: dict[str, str]) -> None:
 
 def qcol(h: str, a: int = 255) -> QColor:
     c = QColor(h); c.setAlpha(a); return c
+
+
+def _play_jarvis_hologram_sound():
+    """Synthesize and play an instant JARVIS holographic sci-fi opening sweep."""
+    def _synth():
+        try:
+            if _OS == "Windows":
+                import winsound
+                import struct
+                import math
+                sr = 22050
+                duration = 0.22
+                n_samples = int(sr * duration)
+                data = bytearray()
+                for i in range(n_samples):
+                    t = i / sr
+                    f1 = 520 + 820 * (t / duration) ** 1.5
+                    f2 = 1040 + 1300 * (t / duration) ** 1.2
+                    env = (1.0 - (t / duration) ** 1.8) * min(1.0, t / 0.012)
+                    val = 0.55 * math.sin(2 * math.pi * f1 * t) + 0.45 * math.sin(2 * math.pi * f2 * t)
+                    sample = int(max(-32767, min(32767, val * env * 22000)))
+                    data.extend(struct.pack('<h', sample))
+                header = struct.pack(
+                    '<4sI4s4sIHHIIHH4sI',
+                    b'RIFF', 36 + len(data), b'WAVE',
+                    b'fmt ', 16, 1, 1, sr, sr * 2, 2, 16,
+                    b'data', len(data)
+                )
+                winsound.PlaySound(header + bytes(data), winsound.SND_MEMORY | winsound.SND_ASYNC)
+        except Exception:
+            pass
+    threading.Thread(target=_synth, daemon=True, name="jarvis-holo-sound").start()
+
+
+def _play_jarvis_transition_sound():
+    """Synthesize and play an epic JARVIS holographic fullscreen transition sweep & chime."""
+    def _synth():
+        try:
+            if _OS == "Windows":
+                import winsound
+                import struct
+                import math
+                sr = 22050
+                duration = 0.36
+                n_samples = int(sr * duration)
+                data = bytearray()
+                for i in range(n_samples):
+                    t = i / sr
+                    # Ascending sci-fi power chord transition
+                    f1 = 440 + 880 * math.sqrt(t / duration)
+                    f2 = 880 + 1320 * (t / duration) ** 1.3
+                    f3 = 1760 + 440 * math.sin(t * 30.0)
+                    env = (1.0 - (t / duration) ** 1.4) * min(1.0, t / 0.008)
+                    val = 0.40 * math.sin(2 * math.pi * f1 * t) + 0.35 * math.sin(2 * math.pi * f2 * t) + 0.25 * math.sin(2 * math.pi * f3 * t)
+                    sample = int(max(-32767, min(32767, val * env * 24000)))
+                    data.extend(struct.pack('<h', sample))
+                header = struct.pack(
+                    '<4sI4s4sIHHIIHH4sI',
+                    b'RIFF', 36 + len(data), b'WAVE',
+                    b'fmt ', 16, 1, 1, sr, sr * 2, 2, 16,
+                    b'data', len(data)
+                )
+                winsound.PlaySound(header + bytes(data), winsound.SND_MEMORY | winsound.SND_ASYNC)
+        except Exception:
+            pass
+    threading.Thread(target=_synth, daemon=True, name="jarvis-trans-sound").start()
+
 
 
 # ── Windows GPU via NVML DLL (no subprocess, no console window) ──────────────
@@ -441,9 +514,199 @@ class HudCanvas(QWidget):
         self._base_scale = 1.0    # slow "breathing" target; amp is added per-frame
         self._base_halo  = 55.0
 
+        # Hand Gesture Tracking State
+        self.gesture_scale = 1.0
+        self.gesture_banner_text = ""
+        self.gesture_banner_alpha = 0.0
+
+        # Finger Pointer Tracking State
+        self._finger_pos: tuple[float, float] | None = None
+        self._finger_action: str | None = None
+
+        # Floating Holographic News & Intel Cards
+        self.floating_news: list[dict] = []
+        self._drag_card: dict | None = None
+        self._drag_offset: tuple[float, float] = (0.0, 0.0)
+        self._drag_start_pos: tuple[float, float] | None = None
+        self._target_drag_x: float = 0.0
+        self._target_drag_y: float = 0.0
+        self._over_open: bool = False
+        self._over_trash: bool = False
+        self.on_card_click = None
+        self.on_card_open_fullscreen = None
+
         self._tmr = QTimer(self)
         self._tmr.timeout.connect(self._step)
         self._tmr.start(16)
+
+    def set_floating_news(self, items: list[dict]) -> None:
+        """Position holographic floating news boxes on left and right of HUD."""
+        self.floating_news = []
+        W, H = max(400, self.width()), max(300, self.height())
+        card_w, card_h = 165.0, 72.0
+        for i, it in enumerate(items[:6]):
+            side = "left" if i % 2 == 0 else "right"
+            row = i // 2
+            if side == "left":
+                x = 16.0
+                y = 55.0 + row * 82.0
+            else:
+                x = max(16.0, float(W - card_w - 16.0))
+                y = 55.0 + row * 82.0
+            title = it.get("title", f"News #{i+1}")
+            body = it.get("body", "")
+            self.floating_news.append({
+                "id": i,
+                "title": title,
+                "body": body,
+                "x": x,
+                "y": y,
+                "w": card_w,
+                "h": card_h,
+                "side": side,
+            })
+        _play_jarvis_hologram_sound()
+        self.show_gesture_feedback(f"◈ {len(self.floating_news)} NEWS WIDGETS SPAWNED")
+        self.update()
+
+    def mousePressEvent(self, event):
+        pos = event.position() if hasattr(event, 'position') else event.pos()
+        px, py = pos.x(), pos.y()
+        for card in reversed(self.floating_news):
+            rx, ry, rw, rh = card['x'], card['y'], card['w'], card['h']
+            if rx <= px <= rx + rw and ry <= py <= ry + rh:
+                if px >= rx + rw - 22 and py <= ry + 22:
+                    self.floating_news.remove(card)
+                    _play_jarvis_hologram_sound()
+                    self.show_gesture_feedback("◈ NEWS CARD CLOSED ✕")
+                    self.update()
+                    return
+                self._drag_card = card
+                self._drag_start_pos = (px, py)
+                self._drag_offset = (px - rx, py - ry)
+                self._target_drag_x = card['x']
+                self._target_drag_y = card['y']
+                self._over_open = False
+                self._over_trash = False
+                self.update()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos = event.position() if hasattr(event, 'position') else event.pos()
+        px, py = pos.x(), pos.y()
+        if self._drag_card:
+            W, H = self.width(), self.height()
+            self._target_drag_x = max(4.0, min(W - self._drag_card['w'] - 4.0, px - self._drag_offset[0]))
+            self._target_drag_y = max(4.0, min(H - self._drag_card['h'] - 4.0, py - self._drag_offset[1]))
+            self._over_open = (px <= 165 and py >= H - 65)
+            self._over_trash = (px >= W - 145 and py >= H - 65)
+            self.update()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        pos = event.position() if hasattr(event, 'position') else event.pos()
+        px, py = pos.x(), pos.y()
+        if self._drag_card:
+            card = self._drag_card
+            self._drag_card = None
+            W, H = self.width(), self.height()
+            if px <= 165 and py >= H - 65:
+                _play_jarvis_transition_sound()
+                self.show_gesture_feedback("◈ EXPANDED FULLSCREEN 📂")
+                if callable(getattr(self, 'on_card_open_fullscreen', None)):
+                    self.on_card_open_fullscreen(card)
+                self._over_open = False
+                self._over_trash = False
+                self.update()
+                return
+            elif px >= W - 145 and py >= H - 65:
+                if card in self.floating_news:
+                    self.floating_news.remove(card)
+                _play_jarvis_hologram_sound()
+                self.show_gesture_feedback("◈ DISPOSED IN TRASH 🗑️")
+                self._over_open = False
+                self._over_trash = False
+                self.update()
+                return
+            self._over_open = False
+            self._over_trash = False
+            if self._drag_start_pos:
+                dist = math.hypot(px - self._drag_start_pos[0], py - self._drag_start_pos[1])
+                if dist < 6.0:
+                    _play_jarvis_hologram_sound()
+                    if callable(getattr(self, 'on_card_click', None)):
+                        self.on_card_click(card)
+            self.update()
+            return
+        super().mouseReleaseEvent(event)
+
+    def on_camera_finger_pointer(self, norm_x: float, norm_y: float, action: str) -> None:
+        """
+        Handle camera fingertip pointer events:
+        - 'pick' (Index + Thumb Pinch 🤏): Smoothly grab & drag floating news cards.
+        - 'release': Drops dragged card; expands if over OPEN ZONE, deletes if in TRASH ZONE.
+        """
+        W, H = max(400, self.width()), max(300, self.height())
+        px = max(0.0, min(float(W), float(norm_x * W)))
+        py = max(0.0, min(float(H), float(norm_y * H)))
+
+        if action == "release":
+            if self._drag_card:
+                card = self._drag_card
+                self._drag_card = None
+                if px <= 165 and py >= H - 65:
+                    _play_jarvis_transition_sound()
+                    self.show_gesture_feedback("◈ EXPANDED FULLSCREEN 📂")
+                    if callable(getattr(self, 'on_card_open_fullscreen', None)):
+                        self.on_card_open_fullscreen(card)
+                elif px >= W - 145 and py >= H - 65:
+                    if card in self.floating_news:
+                        self.floating_news.remove(card)
+                    _play_jarvis_hologram_sound()
+                    self.show_gesture_feedback("◈ DISPOSED IN TRASH 🗑️")
+                self._over_open = False
+                self._over_trash = False
+            self._finger_pos = None
+            self._finger_action = None
+            self.update()
+            return
+
+        self._finger_pos = (px, py)
+        self._finger_action = action
+
+        if action == "pick":
+            # Index + Thumb Pinch Pick (Smooth LERP Target)
+            if not self._drag_card:
+                for card in reversed(self.floating_news):
+                    rx, ry, rw, rh = card['x'], card['y'], card['w'], card['h']
+                    if rx - 20 <= px <= rx + rw + 20 and ry - 20 <= py <= ry + rh + 20:
+                        self._drag_card = card
+                        self._drag_offset = (px - rx, py - ry)
+                        self._target_drag_x = card['x']
+                        self._target_drag_y = card['y']
+                        self._over_open = False
+                        self._over_trash = False
+                        break
+            if self._drag_card:
+                self._target_drag_x = max(4.0, min(W - self._drag_card['w'] - 4.0, px - self._drag_offset[0]))
+                self._target_drag_y = max(4.0, min(H - self._drag_card['h'] - 4.0, py - self._drag_offset[1]))
+                self._over_open = (px <= 165 and py >= H - 65)
+                self._over_trash = (px >= W - 145 and py >= H - 65)
+
+        self.update()
+
+    def set_gesture_scale(self, scale: float) -> None:
+        """Dynamically zoom the 3D Hologram / Arc Reactor with 2-hand gesture."""
+        self.gesture_scale = max(0.45, min(2.8, float(scale)))
+        self.update()
+
+    def show_gesture_feedback(self, text: str) -> None:
+        """Display glowing HUD holographic feedback on gesture action."""
+        self.gesture_banner_text = text
+        self.gesture_banner_alpha = 1.0
+        self.update()
 
     def glance(self, dx: float, dy: float, hold: float = 1.1) -> None:
         """Ask the avatar to look somewhere for a moment (see HoloAvatar.glance)."""
@@ -578,10 +841,18 @@ class HudCanvas(QWidget):
         # uses — one audio source, so the mouth can never drift out of sync.
         dt = now - self._step_t
         self._step_t = now
+
+        # Smooth LERP interpolation for dragged news card
+        if self._drag_card:
+            self._drag_card['x'] += (self._target_drag_x - self._drag_card['x']) * 0.40
+            self._drag_card['y'] += (self._target_drag_y - self._drag_card['y']) * 0.40
         # Integrated, not derived from absolute time: multiplying wall-clock by
         # a rate that changes with state jumps the rings the instant JARVIS
         # starts talking. Same lesson the head's sway taught.
         self._core_phase += min(0.10, max(0.0, dt))
+        if self.gesture_banner_alpha > 0.0:
+            self.gesture_banner_alpha = max(0.0, self.gesture_banner_alpha - dt * 0.55)
+
 
         if self._avatar is not None and self.hud_style == "face":
             self._avatar.step(dt, amp, speaking=self.speaking,
@@ -827,7 +1098,7 @@ class HudCanvas(QWidget):
         if self._avatar is not None and self.hud_style == "face":
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08))
+            _r_head = min(fw * 0.355, _band_h / (self._avatar.SPAN + 0.08)) * self.gesture_scale
             _head_cy = _band_t + (_band_h - self._avatar.SPAN * _r_head) / 2.0 + _r_head
 
             if self.muted:
@@ -851,8 +1122,134 @@ class HudCanvas(QWidget):
         else:
             _band_t = 12.0
             _band_h = max(60.0, _sy_status - 12.0 - _band_t)
-            _r = min(W * 0.46, _band_h / 2.0)
+            _r = min(W * 0.46, _band_h / 2.0) * self.gesture_scale
             self._paint_core(p, cx, _band_t + _band_h / 2.0, _r, W, _band_h)
+
+        # ── Holographic Hand Gesture Banner ──
+        if self.gesture_banner_alpha > 0.02 and self.gesture_banner_text:
+            p.save()
+            gb_col = qcol(C.PRI, int(min(1.0, self.gesture_banner_alpha) * 255))
+            gb_bg = qcol(C.PANEL2, int(min(1.0, self.gesture_banner_alpha) * 220))
+            p.setPen(QPen(gb_col, 1.2))
+            p.setBrush(QBrush(gb_bg))
+            gb_rect = QRectF(cx - 150, 18, 300, 28)
+            p.drawRoundedRect(gb_rect, 6, 6)
+            p.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            p.drawText(gb_rect, Qt.AlignmentFlag.AlignCenter, self.gesture_banner_text)
+            p.restore()
+
+        # ── 10. Floating Holographic News Cards with Connector Arrows ──
+        if self.floating_news:
+            p.save()
+            for card in self.floating_news:
+                cx_c = card['x']
+                cy_c = card['y']
+                cw_c = card['w']
+                ch_c = card['h']
+
+                # Holographic Connector Arrow (Small & Sleek)
+                if cx_c < cx:
+                    # Left side card pointing right towards center (─▷)
+                    ax = cx_c + cw_c + 2.0
+                    ay = cy_c + ch_c / 2.0
+                    p.setPen(QPen(qcol(C.PRI, 220), 1.2))
+                    p.drawLine(QLineF(ax, ay, ax + 8.0, ay))
+                    p.drawLine(QLineF(ax + 8.0, ay, ax + 5.0, ay - 3.0))
+                    p.drawLine(QLineF(ax + 8.0, ay, ax + 5.0, ay + 3.0))
+                else:
+                    # Right side card pointing left towards center (◁─)
+                    ax = cx_c - 2.0
+                    ay = cy_c + ch_c / 2.0
+                    p.setPen(QPen(qcol(C.PRI, 220), 1.2))
+                    p.drawLine(QLineF(ax, ay, ax - 8.0, ay))
+                    p.drawLine(QLineF(ax - 8.0, ay, ax - 5.0, ay - 3.0))
+                    p.drawLine(QLineF(ax - 8.0, ay, ax - 5.0, ay + 3.0))
+
+                # Transparent Glass Card
+                is_dragged = (card == self._drag_card)
+                card_rect = QRectF(cx_c, cy_c, cw_c, ch_c)
+                p.setBrush(QBrush(qcol(C.PANEL, 215 if not is_dragged else 245)))
+                p.setPen(QPen(qcol(C.PRI if is_dragged else C.BORDER_B, 220), 1.4 if not is_dragged else 2.0))
+                p.drawRoundedRect(card_rect, 5, 5)
+
+                # Corner brackets
+                p.setPen(QPen(qcol(C.PRI, 255), 1.8))
+                m = 4
+                p.drawLine(QLineF(cx_c, cy_c + m, cx_c, cy_c))
+                p.drawLine(QLineF(cx_c, cy_c, cx_c + m, cy_c))
+                p.drawLine(QLineF(cx_c + cw_c - m, cy_c, cx_c + cw_c, cy_c))
+                p.drawLine(QLineF(cx_c + cw_c, cy_c, cx_c + cw_c, cy_c + m))
+
+                # Category Badge
+                p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+                p.setPen(QPen(qcol(C.PRI_DIM, 255), 1))
+                p.drawText(QRectF(cx_c + 7, cy_c + 4, cw_c - 26, 12), Qt.AlignmentFlag.AlignLeft, "◈ INTEL")
+
+                # Close Button '✕'
+                p.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+                p.setPen(QPen(qcol(C.RED, 220), 1))
+                p.drawText(QRectF(cx_c + cw_c - 16, cy_c + 3, 12, 12), Qt.AlignmentFlag.AlignCenter, "✕")
+
+                # News Title
+                p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+                p.setPen(QPen(qcol(C.WHITE, 240), 1))
+                fm = p.fontMetrics()
+                elided = fm.elidedText(card['title'], Qt.TextElideMode.ElideRight, int(cw_c - 14))
+                p.drawText(QRectF(cx_c + 7, cy_c + 18, cw_c - 14, 34), Qt.TextFlag.TextWordWrap, elided)
+
+            # ── Draw OPEN OPTION Zone (Bottom-Left) ──
+            open_rect = QRectF(16, H - 56, 140, 38)
+            p.setBrush(QBrush(qcol(C.PRI if self._over_open else C.PANEL2, 160 if not self._over_open else 235)))
+            p.setPen(QPen(qcol(C.PRI if self._over_open else C.BORDER_B, 255 if self._over_open else 180),
+                          2.0 if self._over_open else 1.2,
+                          Qt.PenStyle.SolidLine if self._over_open else Qt.PenStyle.DashLine))
+            p.drawRoundedRect(open_rect, 6, 6)
+            p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+            p.setPen(QPen(qcol(C.WHITE if self._over_open else C.PRI_DIM, 255), 1))
+            p.drawText(open_rect, Qt.AlignmentFlag.AlignCenter, "📂 DROP TO EXPAND" if self._over_open else "📂 OPEN FULLSCREEN")
+
+            # ── Draw Dustbin / Trash Can Zone (Bottom-Right) ──
+            trash_rect = QRectF(W - 135, H - 56, 122, 38)
+            p.setBrush(QBrush(qcol(C.RED if self._over_trash else C.PANEL2, 160 if not self._over_trash else 230)))
+            p.setPen(QPen(qcol(C.RED if self._over_trash else C.BORDER_B, 255 if self._over_trash else 180),
+                          2.0 if self._over_trash else 1.2,
+                          Qt.PenStyle.SolidLine if self._over_trash else Qt.PenStyle.DashLine))
+            p.drawRoundedRect(trash_rect, 6, 6)
+            p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+            p.setPen(QPen(qcol(C.WHITE if self._over_trash else C.TEXT_DIM, 255), 1))
+            p.drawText(trash_rect, Qt.AlignmentFlag.AlignCenter, "🗑️ DROP TO DELETE" if self._over_trash else "🗑️ TRASH ZONE")
+            p.restore()
+
+        # ── Holographic Fingertip Cursor Reticle ──
+        if getattr(self, '_finger_pos', None) is not None:
+            fx, fy = self._finger_pos
+            p.save()
+            act = getattr(self, '_finger_action', None)
+            is_2f = (act == "open_2finger")
+            is_pick = (act == "pick")
+            if is_2f:
+                cur_col = qcol("#00ff88")
+                lbl = "✌️ 2-FINGER OPEN"
+            elif is_pick:
+                cur_col = qcol("#38bdf8")
+                lbl = "🤏 PINCH & DRAG"
+            else:
+                cur_col = qcol("#00d4ff")
+                lbl = "☝️ 1-FINGER DRAG"
+
+            p.setPen(QPen(cur_col, 1.8))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(fx, fy), 14, 14)
+            p.drawEllipse(QPointF(fx, fy), 5, 5)
+            p.drawLine(QLineF(fx - 22, fy, fx - 8, fy))
+            p.drawLine(QLineF(fx + 8, fy, fx + 22, fy))
+            p.drawLine(QLineF(fx, fy - 22, fx, fy - 8))
+            p.drawLine(QLineF(fx, fy + 8, fx, fy + 22))
+            p.setFont(QFont("Courier New", 7, QFont.Weight.Bold))
+            p.setPen(QPen(cur_col, 1))
+            p.drawText(QRectF(fx + 16, fy - 8, 140, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, lbl)
+            p.restore()
+
 
         # status text
         sy = _sy_status
@@ -3085,6 +3482,147 @@ class RemoteKeyOverlay(QWidget):
         self.closed.emit()
 
 
+class FullscreenNewsModal(QWidget):
+    """
+    Stunning Fullscreen JARVIS Holographic Intelligence Overlay.
+    Provides glassmorphic backdrop, glowing neon cybernetic borders, 
+    large title, full formatted story text, inside navigation arrows, and close button.
+    """
+    closed = pyqtSignal()
+    prev_requested = pyqtSignal()
+    next_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(f"""
+            FullscreenNewsModal {{
+                background: rgba(0, 8, 14, 0.96);
+                border: 2px solid {C.PRI};
+                border-radius: 8px;
+            }}
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setSpacing(10)
+
+        # Header bar
+        hdr = QHBoxLayout()
+        icon = QLabel("◈")
+        icon.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        icon.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(icon)
+
+        title_badge = QLabel("J.A.R.V.I.S INTELLIGENCE ARCHIVE — FULLSCREEN INTEL")
+        title_badge.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        title_badge.setStyleSheet(f"color: {C.PRI}; background: transparent; letter-spacing: 2px;")
+        hdr.addWidget(title_badge)
+        hdr.addStretch()
+
+        self._counter_lbl = QLabel("[ 1 / 1 ]")
+        self._counter_lbl.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        self._counter_lbl.setStyleSheet(f"color: {C.ACC2}; background: transparent;")
+        hdr.addWidget(self._counter_lbl)
+
+        hdr.addSpacing(10)
+        close_btn = QPushButton("✕  CLOSE (ESC)")
+        close_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(255, 51, 85, 0.15); color: {C.RED};
+                border: 1px solid {C.RED}; border-radius: 4px; padding: 4px 10px;
+            }}
+            QPushButton:hover {{
+                background: {C.RED}; color: #ffffff;
+            }}
+        """)
+        close_btn.clicked.connect(self.hide_modal)
+        hdr.addWidget(close_btn)
+        lay.addLayout(hdr)
+
+        # Main Article Title
+        self._title_lbl = QLabel("")
+        self._title_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self._title_lbl.setStyleSheet(f"color: {C.WHITE}; background: transparent; padding: 4px 0;")
+        self._title_lbl.setWordWrap(True)
+        lay.addWidget(self._title_lbl)
+
+        # Body row with inside navigation arrows
+        body_row = QHBoxLayout()
+        body_row.setSpacing(10)
+
+        prev_btn = QPushButton("◀\n\nP\nR\nE\nV")
+        prev_btn.setFixedWidth(38)
+        prev_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        prev_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        prev_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(0, 19, 30, 0.85); color: {C.PRI};
+                border: 1px solid {C.BORDER_B}; border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background: {C.PRI_GHO}; color: {C.WHITE}; border-color: {C.PRI};
+            }}
+        """)
+        prev_btn.clicked.connect(self.prev_requested.emit)
+        body_row.addWidget(prev_btn)
+
+        self._text_edit = QTextEdit()
+        self._text_edit.setReadOnly(True)
+        self._text_edit.setFont(QFont("Segoe UI", 11))
+        self._text_edit.setStyleSheet(f"""
+            QTextEdit {{
+                background: rgba(0, 10, 18, 0.80);
+                color: {C.TEXT};
+                border: 1px solid {C.BORDER};
+                border-radius: 6px;
+                padding: 14px 18px;
+                line-height: 1.6;
+            }}
+            QScrollBar:vertical {{
+                background: {C.BG}; width: 8px; border: none;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {C.BORDER_B}; border-radius: 4px; min-height: 24px;
+            }}
+        """)
+        body_row.addWidget(self._text_edit)
+
+        next_btn = QPushButton("▶\n\nN\nE\nX\nT")
+        next_btn.setFixedWidth(38)
+        next_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        next_btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        next_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(0, 19, 30, 0.85); color: {C.PRI};
+                border: 1px solid {C.BORDER_B}; border-radius: 5px;
+            }}
+            QPushButton:hover {{
+                background: {C.PRI_GHO}; color: {C.WHITE}; border-color: {C.PRI};
+            }}
+        """)
+        next_btn.clicked.connect(self.next_requested.emit)
+        body_row.addWidget(next_btn)
+
+        lay.addLayout(body_row)
+        self.hide()
+
+    def show_article(self, title: str, body: str, index: int = 1, total: int = 1):
+        self._title_lbl.setText(title)
+        self._text_edit.setPlainText(body)
+        self._text_edit.moveCursor(self._text_edit.textCursor().MoveOperation.Start)
+        self._counter_lbl.setText(f"[ {index} / {total} ]")
+        self.show()
+        self.raise_()
+
+    def hide_modal(self):
+        self.hide()
+        self.closed.emit()
+
+
 class MainWindow(QMainWindow):
     _log_sig        = pyqtSignal(str)
     _state_sig      = pyqtSignal(str)
@@ -3100,6 +3638,12 @@ class MainWindow(QMainWindow):
     _quiz_sig       = pyqtSignal(str, object, object)  # (topic, questions, grader)
     _quiz_hide_sig  = pyqtSignal()
     _review_sig     = pyqtSignal(str, str, object, object)  # document review payload
+    _gesture_swipe_sig = pyqtSignal(str)       # "left" | "right" | "up" | "down"
+    _gesture_zoom_sig  = pyqtSignal(float)     # scale factor from 2-hand gesture
+    _gesture_pan_sig   = pyqtSignal(float, float) # (dx, dy) avatar look pan
+    _finger_pointer_sig = pyqtSignal(float, float, str) # (norm_x, norm_y, action: "move"|"open_2finger"|"release")
+    _news_cmd_sig       = pyqtSignal(str, int)          # ("close"|"open", index)
+
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -3162,6 +3706,7 @@ class MainWindow(QMainWindow):
         # Center column: HUD + resizable content panel via QSplitter
         self.hud = HudCanvas(face_path, _display)
         self.hud.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.hud.on_card_click = self._on_floating_card_clicked
         self._content_panel = self._build_content_panel()
         self._quiz_panel = self._build_quiz_panel()
 
@@ -3259,7 +3804,18 @@ class MainWindow(QMainWindow):
         self._quiz_sig.connect(self._show_quiz)
         self._quiz_hide_sig.connect(self._hide_quiz)
         self._review_sig.connect(self._show_review)
+        self._gesture_swipe_sig.connect(self._on_gesture_swipe)
+        self._gesture_zoom_sig.connect(self._on_gesture_zoom)
+        self._gesture_pan_sig.connect(self._on_gesture_pan)
+        self._finger_pointer_sig.connect(self.hud.on_camera_finger_pointer)
+        self._gesture_tracker = None
         self._cam_stop = threading.Event()
+
+        self._fullscreen_news_modal = FullscreenNewsModal(self.centralWidget())
+        self._fullscreen_news_modal.prev_requested.connect(self._prev_fullscreen_news)
+        self._fullscreen_news_modal.next_requested.connect(self._next_fullscreen_news)
+        self.hud.on_card_open_fullscreen = self._open_fullscreen_news
+        self._news_cmd_sig.connect(self._handle_news_cmd)
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
         self._cam_preview = _CameraPreview(self.centralWidget())
@@ -3279,7 +3835,7 @@ class MainWindow(QMainWindow):
         sc_full = QShortcut(QKeySequence("F11"), self)
         sc_full.activated.connect(self._toggle_fullscreen)
         sc_intr = QShortcut(QKeySequence("Escape"), self)
-        sc_intr.activated.connect(self._do_interrupt)
+        sc_intr.activated.connect(self._on_escape_pressed)
 
     def _show_camera_frame(self, img_bytes: bytes):
         """Slot — display camera preview overlay (main thread)."""
@@ -3739,12 +4295,28 @@ class MainWindow(QMainWindow):
             cw.height() - ph - 28,
             pw, ph,
         )
-        # Clipboard panel — bottom-center
+        if hasattr(self, '_fullscreen_news_modal') and self._fullscreen_news_modal.isVisible():
+            self._fullscreen_news_modal.setGeometry(
+                12, 12,
+                cw.width() - 24,
+                cw.height() - 24,
+            )
         if hasattr(self, '_clipboard_panel') and self._clipboard_panel.isVisible():
             self._position_clipboard_panel()
         # Quick drawer — reposition if open
         if hasattr(self, '_quick_drawer') and self._quick_drawer.isVisible():
             self._position_quick_drawer()
+
+    def closeEvent(self, event):
+        if self._gesture_tracker:
+            try:
+                self._gesture_tracker.stop()
+            except Exception:
+                pass
+            self._gesture_tracker = None
+        self.stop_camera_stream()
+        super().closeEvent(event)
+
 
     def _update_metrics(self):
         snap = _metrics.snapshot()
@@ -3828,6 +4400,24 @@ class MainWindow(QMainWindow):
         self._drawer_btn.setCheckable(True)
         self._drawer_btn.clicked.connect(self._toggle_drawer)
         lay.addWidget(self._drawer_btn)
+        lay.addSpacing(6)
+
+        self._gesture_btn = QPushButton("✋ GESTURES")
+        self._gesture_btn.setFixedHeight(26)
+        self._gesture_btn.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._gesture_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._gesture_btn.setToolTip("Toggle Hand Swipe Gestures (Swipe Left: Arc Reactor, Swipe Right: Face Avatar, Swipe Up: Themes)")
+        self._gesture_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent; color: {C.TEXT_DIM};
+                border: 1px solid {C.BORDER}; border-radius: 4px; padding: 0 8px;
+            }}
+            QPushButton:hover {{ color: {C.PRI}; border-color: {C.PRI_DIM}; }}
+            QPushButton:checked {{ color: {C.PRI}; border-color: {C.PRI}; background: {C.PRI_GHO}; }}
+        """)
+        self._gesture_btn.setCheckable(True)
+        self._gesture_btn.clicked.connect(self._toggle_gestures)
+        lay.addWidget(self._gesture_btn)
         lay.addStretch()
 
         mid = QVBoxLayout(); mid.setSpacing(1)
@@ -4182,6 +4772,100 @@ class MainWindow(QMainWindow):
         self._quick_drawer.adjustSize()
         self._quick_drawer.setGeometry(12, 54, _W, self._quick_drawer.sizeHint().height())
 
+    def _toggle_gestures(self, checked: bool = None):
+        if checked is None:
+            checked = getattr(self, '_gesture_btn', None) and self._gesture_btn.isChecked()
+        if checked:
+            if GestureTracker is None:
+                self._log.append_log("ERR: Gesture Tracker not available (opencv/mediapipe missing).")
+                if hasattr(self, '_gesture_btn'):
+                    self._gesture_btn.setChecked(False)
+                return
+            cam_idx = 0
+            try:
+                cfg = _read_full_config()
+                cam_idx = int(cfg.get("camera_index", 0))
+            except Exception:
+                pass
+            
+            self._gesture_tracker = GestureTracker(
+                camera_index=cam_idx,
+                on_swipe=lambda d: self._gesture_swipe_sig.emit(d),
+                on_pan=lambda dx, dy: self._gesture_pan_sig.emit(dx, dy),
+                on_finger_pointer=lambda x, y, act: self._finger_pointer_sig.emit(x, y, act),
+            )
+            if self._gesture_tracker.start():
+                self.hud.show_gesture_feedback("◈ HAND SWIPE & FINGER CONTROL ACTIVE")
+                self._log.append_log("SYS: Gesture & Finger Control activated (1-Finger: Drag News | 2-Finger: Open News | Hand Swipe: Switch HUD).")
+                if hasattr(self, '_gesture_btn'):
+                    self._gesture_btn.setChecked(True)
+            else:
+                self._gesture_tracker = None
+                self._log.append_log("ERR: Failed to open camera for gesture tracking.")
+                if hasattr(self, '_gesture_btn'):
+                    self._gesture_btn.setChecked(False)
+        else:
+            if self._gesture_tracker:
+                self._gesture_tracker.stop()
+                self._gesture_tracker = None
+            self.hud.show_gesture_feedback("◈ GESTURE TRACKING OFF")
+            self._log.append_log("SYS: Gesture Tracking stopped.")
+            if hasattr(self, '_gesture_btn'):
+                self._gesture_btn.setChecked(False)
+
+    _THEME_PALETTES = [
+        ("#00d4ff", "CYAN JARVIS"),
+        ("#ff3355", "CRIMSON ULTRON"),
+        ("#ffaa00", "GOLD MARK LIV"),
+        ("#00ff88", "MATRIX EMERALD"),
+        ("#a855f7", "CYBER VIOLET"),
+        ("#38bdf8", "STARK BLUE"),
+    ]
+
+    def _on_gesture_swipe(self, direction: str):
+        """
+        Hand swipe ONLY switches between the TWO HUD modes:
+        1. JARVIS 3D Holographic Face Avatar ('face')
+        2. Ultron Arc Reactor Core ('core')
+        No theme colors and no news hijacking.
+        """
+        direction = (direction or "").lower()
+        current = getattr(self.hud, 'hud_style', 'face')
+
+        if direction == "left":
+            new_style = "core"
+        elif direction == "right":
+            new_style = "face"
+        else:
+            new_style = "core" if current == "face" else "face"
+
+        self.hud.hud_style = new_style
+        self.hud.update()
+        if hasattr(self, '_refresh_hud_btn'):
+            self._refresh_hud_btn()
+        _play_jarvis_hologram_sound()
+
+        if new_style == "core":
+            self.hud.glance(-1.0, 0.0, hold=0.6)
+            self.hud.show_gesture_feedback("◈ HUD: ULTRON ARC REACTOR ⚡")
+            self._log.append_log("HUD: Switched to Ultron Arc Reactor via Hand Swipe.")
+        else:
+            self.hud.glance(1.0, 0.0, hold=0.6)
+            self.hud.show_gesture_feedback("◈ HUD: JARVIS 3D FACE AVATAR 👤")
+            self._log.append_log("HUD: Switched to JARVIS 3D Hologram Face via Hand Swipe.")
+
+        try:
+            from memory.config_manager import save_hud_style
+            save_hud_style(new_style)
+        except Exception:
+            pass
+
+    def _on_gesture_zoom(self, scale: float):
+        pass
+
+    def _on_gesture_pan(self, dx: float, dy: float):
+        self.hud.glance(dx * 0.85, -dy * 0.85, hold=0.35)
+
     def _build_input_row(self) -> QHBoxLayout:
         row = QHBoxLayout(); row.setSpacing(5)
         self._input = QLineEdit()
@@ -4215,68 +4899,96 @@ class MainWindow(QMainWindow):
 
     def _build_content_panel(self) -> QWidget:
         """
-        Collapsible panel below the HUD — shows search results, news, briefings.
-        Hidden by default; appears when show_content() is called.
+        Collapsible holographic glassmorphic news & briefing carousel panel.
+        Contains inside-border navigation arrows (◀ / ▶) and prominent close cross (✕).
         """
         w = QWidget()
         w.setObjectName("ContentPanel")
         w.setStyleSheet(f"""
             QWidget#ContentPanel {{
                 background: {C.PANEL};
-                border-top: 1px solid {C.BORDER_B};
+                border-top: 2px solid {C.PRI_DIM};
+                border-bottom: 1px solid {C.BORDER_B};
             }}
         """)
         w.hide()
 
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(12, 7, 12, 8)
-        lay.setSpacing(5)
+        lay.setContentsMargins(10, 6, 10, 8)
+        lay.setSpacing(4)
 
         # ── header row ───────────────────────────────────────────────────────
-        hdr = QHBoxLayout(); hdr.setSpacing(6)
+        hdr = QHBoxLayout(); hdr.setSpacing(8)
 
         dot = QLabel("◈")
-        dot.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+        dot.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
         dot.setStyleSheet(f"color: {C.PRI}; background: transparent;")
         hdr.addWidget(dot)
 
-        self._content_title_lbl = QLabel("BRIEFING")
+        self._content_title_lbl = QLabel("NEWS & BRIEFINGS")
         self._content_title_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
         self._content_title_lbl.setStyleSheet(
             f"color: {C.PRI}; background: transparent; letter-spacing: 1px;"
         )
         hdr.addWidget(self._content_title_lbl)
+
         hdr.addStretch()
+
+        # Carousel Page Indicator
+        self._carousel_counter_lbl = QLabel("[ 1 / 1 ]")
+        self._carousel_counter_lbl.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+        self._carousel_counter_lbl.setStyleSheet(f"color: {C.PRI}; background: transparent;")
+        hdr.addWidget(self._carousel_counter_lbl)
 
         self._content_ts_lbl = QLabel("")
         self._content_ts_lbl.setFont(QFont("Courier New", 7))
         self._content_ts_lbl.setStyleSheet(f"color: {C.TEXT_DIM}; background: transparent;")
         hdr.addWidget(self._content_ts_lbl)
 
-        dismiss = QPushButton("DISMISS  ✕")
-        dismiss.setFont(QFont("Courier New", 7))
-        dismiss.setFixedHeight(18)
-        dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
-        dismiss.setStyleSheet(f"""
+        # Prominent Close Cross Button
+        self._content_close_btn = QPushButton("✕")
+        self._content_close_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
+        self._content_close_btn.setFixedSize(22, 22)
+        self._content_close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._content_close_btn.setToolTip("Close News Panel (or Swipe Down)")
+        self._content_close_btn.setStyleSheet(f"""
             QPushButton {{
                 background: transparent; color: {C.TEXT_DIM};
-                border: 1px solid {C.BORDER}; border-radius: 2px; padding: 0 5px;
+                border: 1px solid {C.BORDER}; border-radius: 3px;
             }}
-            QPushButton:hover {{ color: {C.TEXT}; border-color: {C.BORDER_B}; }}
+            QPushButton:hover {{ color: {C.RED}; border-color: {C.RED}; background: rgba(255, 51, 85, 0.15); }}
         """)
-        dismiss.clicked.connect(w.hide)
-        hdr.addWidget(dismiss)
+        self._content_close_btn.clicked.connect(self._close_content_panel)
+        hdr.addWidget(self._content_close_btn)
         lay.addLayout(hdr)
 
-        # ── separator ─────────────────────────────────────────────────────────
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {C.BORDER};"); lay.addWidget(sep)
+        # ── body row with inside-border navigation arrows ────────────────────
+        body_row = QHBoxLayout(); body_row.setSpacing(6)
 
-        # ── text display ──────────────────────────────────────────────────────
+        # Inside Left Border Arrow (◀ PREV)
+        self._nav_left_btn = QPushButton("◀")
+        self._nav_left_btn.setFixedWidth(28)
+        self._nav_left_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._nav_left_btn.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        self._nav_left_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nav_left_btn.setToolTip("Previous News (or Swipe Right)")
+        self._nav_left_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(0, 13, 20, 0.80); color: {C.PRI};
+                border: 1px solid {C.BORDER}; border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                color: {C.WHITE}; border-color: {C.PRI}; background: {C.PRI_GHO};
+            }}
+        """)
+        self._nav_left_btn.clicked.connect(self._prev_news_item)
+        body_row.addWidget(self._nav_left_btn)
+
+        # Middle Text Display Area (Transparent / Glassmorphic)
         self._content_display = QTextEdit()
         self._content_display.setReadOnly(True)
-        self._content_display.setFont(QFont("Courier New", 8))
-        self._content_display.setMinimumHeight(60)
+        self._content_display.setFont(QFont("Courier New", 9))
+        self._content_display.setMinimumHeight(70)
         self._content_display.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -4285,8 +4997,8 @@ class MainWindow(QMainWindow):
                 background: {C.DARK};
                 color: {C.TEXT};
                 border: 1px solid {C.BORDER};
-                border-radius: 3px;
-                padding: 6px 8px;
+                border-radius: 4px;
+                padding: 6px 10px;
                 selection-background-color: {C.PRI_GHO};
             }}
             QScrollBar:vertical {{
@@ -4299,27 +5011,199 @@ class MainWindow(QMainWindow):
                 height: 0; border: none;
             }}
         """)
-        lay.addWidget(self._content_display)
+        body_row.addWidget(self._content_display)
 
+        # Inside Right Border Arrow (NEXT ▶)
+        self._nav_right_btn = QPushButton("▶")
+        self._nav_right_btn.setFixedWidth(28)
+        self._nav_right_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._nav_right_btn.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
+        self._nav_right_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._nav_right_btn.setToolTip("Next News (or Swipe Left)")
+        self._nav_right_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(0, 13, 20, 0.80); color: {C.PRI};
+                border: 1px solid {C.BORDER}; border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                color: {C.WHITE}; border-color: {C.PRI}; background: {C.PRI_GHO};
+            }}
+        """)
+        self._nav_right_btn.clicked.connect(self._next_news_item)
+        body_row.addWidget(self._nav_right_btn)
+
+        lay.addLayout(body_row)
         return w
 
     def _show_content(self, title: str, text: str):
-        """Slot — runs on Qt main thread. Updates and shows the content panel."""
+        """Slot — runs on Qt main thread. Updates and displays news carousel with sci-fi sound."""
         import time as _time
-        # The panel opens below the head, so the head looks down at it. It is a
-        # tiny thing that answers "did that land?" before you read a word.
+        _play_jarvis_hologram_sound()
         self.hud.glance(0.0, -0.85, hold=1.3)
         self._content_title_lbl.setText(title.upper()[:48])
         self._content_ts_lbl.setText(_time.strftime("%H:%M:%S"))
-        self._content_display.setPlainText(text)
-        self._content_display.moveCursor(
-            self._content_display.textCursor().MoveOperation.Start
-        )
+
+        raw = (text or "").strip()
+        items = []
+        # Parse by numbered items, bullets, or paragraphs
+        parts = re.split(r'\n\s*(?:(?:\d+[\.\)]|\-|\*|•|##+)\s+)', raw)
+        if len(parts) > 1:
+            for p in parts:
+                p_str = p.strip()
+                if p_str:
+                    items.append(p_str)
+        else:
+            paragraphs = [p.strip() for p in raw.split("\n\n") if p.strip()]
+            if len(paragraphs) > 1:
+                items = paragraphs
+            else:
+                items = [raw] if raw else ["No news items received."]
+
+        self._news_items = items
+        self._current_news_idx = 0
+        self._update_news_card()
+
+        # Spawn floating rectangular news widgets on left & right of HUD with arrows
+        structured_cards = []
+        for i, it in enumerate(items[:6]):
+            lines = [l.strip(" #*-•") for l in it.strip().splitlines() if l.strip()]
+            t = lines[0] if lines else f"News #{i+1}"
+            b = it.strip()
+            structured_cards.append({"title": t, "body": b})
+        self.hud.set_floating_news(structured_cards)
+
         first_show = not self._content_panel.isVisible()
         self._content_panel.show()
+        self._content_panel.raise_()
         if first_show:
             total = self._center_split.height()
-            self._center_split.setSizes([max(total - 220, 120), 220])
+            self._center_split.setSizes([max(total - 230, 120), 230])
+
+    def _on_floating_card_clicked(self, card: dict):
+        title = card.get("title", "NEWS")
+        body = card.get("body", "")
+        self._content_title_lbl.setText(title.upper()[:48])
+        self._content_display.setPlainText(body)
+        self._content_panel.show()
+        self._content_panel.raise_()
+        self.hud.show_gesture_feedback(f"◈ OPENED: {title[:18]} ↗")
+        self.hud.glance(0.0, -0.6, hold=1.0)
+
+
+    def _update_news_card(self):
+        if not hasattr(self, '_news_items') or not self._news_items:
+            self._content_display.setPlainText("")
+            if hasattr(self, '_carousel_counter_lbl'):
+                self._carousel_counter_lbl.setText("[ 0 / 0 ]")
+            return
+        total = len(self._news_items)
+        idx = max(0, min(total - 1, self._current_news_idx))
+        self._current_news_idx = idx
+        if hasattr(self, '_carousel_counter_lbl'):
+            self._carousel_counter_lbl.setText(f"[ {idx + 1} / {total} ]")
+        item_text = self._news_items[idx]
+        self._content_display.setPlainText(item_text)
+        self._content_display.moveCursor(self._content_display.textCursor().MoveOperation.Start)
+
+    def _next_news_item(self):
+        if hasattr(self, '_news_items') and len(self._news_items) > 1:
+            self._current_news_idx = (self._current_news_idx + 1) % len(self._news_items)
+            self._update_news_card()
+            _play_jarvis_hologram_sound()
+            self.hud.show_gesture_feedback(f"◈ NEWS [{self._current_news_idx + 1}/{len(self._news_items)}] ▶")
+            self.hud.glance(1.0, -0.4, hold=0.5)
+
+    def _prev_news_item(self):
+        if hasattr(self, '_news_items') and len(self._news_items) > 1:
+            self._current_news_idx = (self._current_news_idx - 1) % len(self._news_items)
+            self._update_news_card()
+            _play_jarvis_hologram_sound()
+            self.hud.show_gesture_feedback(f"◈ NEWS [{self._current_news_idx + 1}/{len(self._news_items)}] ◀")
+            self.hud.glance(-1.0, -0.4, hold=0.5)
+
+    def _on_escape_pressed(self):
+        if hasattr(self, '_fullscreen_news_modal') and self._fullscreen_news_modal.isVisible():
+            self._fullscreen_news_modal.hide_modal()
+            return
+        if hasattr(self, '_content_panel') and self._content_panel.isVisible():
+            self._close_content_panel()
+            return
+        self._do_interrupt()
+
+    def _open_fullscreen_news(self, card: dict):
+        title = card.get("title", "INTELLIGENCE BRIEFING")
+        body = card.get("body", "")
+        idx = 1
+        total = 1
+        if hasattr(self, '_news_items') and self._news_items:
+            total = len(self._news_items)
+            for i, it in enumerate(self._news_items):
+                if title.lower() in it.lower() or it.lower() in title.lower():
+                    idx = i + 1
+                    break
+        cw = self.centralWidget()
+        self._fullscreen_news_modal.setGeometry(12, 12, cw.width() - 24, cw.height() - 24)
+        self._fullscreen_news_modal.show_article(title, body, idx, total)
+        self.hud.glance(0.0, -0.6, hold=1.2)
+
+    def _next_fullscreen_news(self):
+        if hasattr(self, '_news_items') and len(self._news_items) > 1:
+            self._current_news_idx = (self._current_news_idx + 1) % len(self._news_items)
+            self._update_news_card()
+            item_text = self._news_items[self._current_news_idx]
+            lines = [l.strip(" #*-•") for l in item_text.splitlines() if l.strip()]
+            t = lines[0] if lines else f"News #{self._current_news_idx+1}"
+            self._fullscreen_news_modal.show_article(t, item_text, self._current_news_idx + 1, len(self._news_items))
+            _play_jarvis_transition_sound()
+
+    def _prev_fullscreen_news(self):
+        if hasattr(self, '_news_items') and len(self._news_items) > 1:
+            self._current_news_idx = (self._current_news_idx - 1) % len(self._news_items)
+            self._update_news_card()
+            item_text = self._news_items[self._current_news_idx]
+            lines = [l.strip(" #*-•") for l in item_text.splitlines() if l.strip()]
+            t = lines[0] if lines else f"News #{self._current_news_idx+1}"
+            self._fullscreen_news_modal.show_article(t, item_text, self._current_news_idx + 1, len(self._news_items))
+            _play_jarvis_transition_sound()
+
+    def _handle_news_cmd(self, action: str, index: int = 0):
+        if action == "close":
+            self.close_all_news()
+        elif action == "open":
+            self.open_news_fullscreen(index)
+
+    def close_all_news(self):
+        self.floating_news = [] if hasattr(self, 'floating_news') else []
+        self.hud.floating_news = []
+        if hasattr(self, '_fullscreen_news_modal'):
+            self._fullscreen_news_modal.hide_modal()
+        if hasattr(self, '_content_panel'):
+            self._content_panel.hide()
+        _play_jarvis_hologram_sound()
+        self.hud.show_gesture_feedback("◈ ALL NEWS CLOSED ✕")
+        self.hud.update()
+
+    def open_news_fullscreen(self, index: int = 0) -> bool:
+        if not hasattr(self, '_news_items') or not self._news_items:
+            return False
+        idx = max(0, min(len(self._news_items) - 1, index))
+        self._current_news_idx = idx
+        item_text = self._news_items[idx]
+        lines = [l.strip(" #*-•") for l in item_text.splitlines() if l.strip()]
+        title = lines[0] if lines else f"News #{idx+1}"
+        cw = self.centralWidget()
+        self._fullscreen_news_modal.setGeometry(12, 12, cw.width() - 24, cw.height() - 24)
+        self._fullscreen_news_modal.show_article(title, item_text, idx + 1, len(self._news_items))
+        _play_jarvis_transition_sound()
+        self.hud.show_gesture_feedback(f"◈ FULLSCREEN: {title[:16]} 📂")
+        self.hud.glance(0.0, -0.6, hold=1.2)
+        return True
+
+    def _close_content_panel(self):
+        if hasattr(self, '_content_panel'):
+            self._content_panel.hide()
+            self.hud.show_gesture_feedback("◈ NEWS CLOSED ✕")
+
 
     # ── document review ──────────────────────────────────────────────────────
     # Rendered as rich text into the content panel that already exists, rather
@@ -5557,6 +6441,14 @@ class JarvisUI:
     def show_content(self, title: str, text: str):
         """Thread-safe: display content in the panel below the HUD."""
         self._win._content_sig.emit(title[:48], text[:4000])
+
+    def close_all_news(self) -> None:
+        """Thread-safe: close and dismiss all news widgets from screen."""
+        self._win._news_cmd_sig.emit("close", 0)
+
+    def open_news_fullscreen(self, index: int = 0) -> None:
+        """Thread-safe: open the specified news card in full screen."""
+        self._win._news_cmd_sig.emit("open", int(index))
 
     def show_quiz(self, topic: str, questions, grade=None) -> None:
         """Thread-safe: put an interactive quiz on the board.
